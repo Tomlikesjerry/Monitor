@@ -1,0 +1,145 @@
+{
+    // -------------------------------------------------------------------------
+    // MySQL 数据库配置
+    // -------------------------------------------------------------------------
+    "MYSQL_CONFIG": {
+        "HOST": "localhost",
+        "PORT": 3306,
+        "USER": ,
+        "PASSWORD":  ,
+        // 请替换为你的数据库密码
+        "DATABASE": "*****"
+    },
+    // -------------------------------------------------------------------------
+    // 数据库表名配置
+    // -------------------------------------------------------------------------
+    "TABLE_NAMES": {
+        "KLINE_DATA": "kline_data",
+        // K线数据表名
+        "FUNDING_RATE_DATA": "funding_rate_data"
+        // 资金费率数据表名
+    },
+    // -------------------------------------------------------------------------
+    // 监控合约列表
+    // -------------------------------------------------------------------------
+    "MONITORED_SYMBOLS": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "XRPUSDT",
+        "SUIUSDT",
+        "AVAXUSDT",
+        "LTCUSDT",
+        "1000PEPEUSDT",
+        "ADAUSDT",
+        "BCHUSDT",
+        "XLMUSDT",
+        "DOTUSDT",
+        "WLFIUSDT",
+        "UNIUSDT",
+        "ETCUSDT",
+        "1000SHIBUSDT",
+        "TRUMPUSDT",
+        "OPUSDT",
+        "NEARUSDT",
+        "CRVUSDT",
+        "APTUSDT",
+        "AAVEUSDT",
+        "TONUSDT",
+        "MELANIAUSDT",
+        "SANDUSDT",
+        "DYDXUSDT",
+        "XTZUSDT",
+
+
+        // 添加更多合约，例如 "SOLUSDT"
+    ],
+    // -------------------------------------------------------------------------
+    // 交易所连接与监控周期配置
+    // -------------------------------------------------------------------------
+    "EXCHANGE_CONFIG": {
+        // 你的平台配置
+        "PLATFORM_A_ID": "BITDA_FUTURES",
+        "PLATFORM_A_API_URL": "https://api.bitda.com",
+        // 你的平台 API 基础 URL
+
+        // 基准平台配置 (币安期货)
+        "BENCHMARK_ID": "BINANCE_FUTURES",
+        "BINANCE_API_URL": "https://fapi.binance.com",
+        // 监控周期
+        "TIME_FRAME": "1m",
+        // K 线的时间周期，例如 '1m' (1 分钟)
+        "FREQUENCY_SECONDS": 60
+        // 脚本主循环的运行频率（秒）。例如 60 秒运行一次
+    },
+    // -------------------------------------------------------------------------
+    // 告警阈值配置
+    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // 告警阈值配置：包含全局默认值和特定标的覆盖值
+    // -------------------------------------------------------------------------
+    "ALERT_CONFIG": {
+        // 飞书 Webhook 地址
+        "LARK_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_KEY",
+        // ⚠️ 请替换
+
+        // 告警总开关
+        "KLINE_PRICE_ALERT_ENABLED": true,
+        "VOLUME_ALERT_ENABLED": true,
+        "FUNDING_RATE_ALERT_ENABLED": true,
+        // --- 核心全局默认阈值 (最低优先级) ---
+        // K线价格阈值 (百分比形式)
+        "OPEN_DEVIATION_THRESHOLD": 0.002,
+        // 0.2%
+        "HIGH_DEVIATION_THRESHOLD": 0.001,
+        // 0.1%
+        "LOW_DEVIATION_THRESHOLD": 0.001,
+        // 0.1%
+        "CLOSE_DEVIATION_THRESHOLD": 0.0005,
+        // 0.05%
+
+        // 交易量阈值
+        "VOLUME_RATIO_THRESHOLD": 0.10,
+        // 10%
+
+        // 资金费率差异阈值
+        "FUNDING_RATE_DIFF_THRESHOLD": 0.0005,
+        // 0.05%
+
+        // --- 标的特定阈值 (覆盖全局配置 - 最高优先级) ---
+        "SYMBOL_THRESHOLDS": {
+            "SOLUSDT": {
+                // 覆盖全局 CLOSE 阈值：对 BTC 收盘价检查更严格
+                "OPEN_DEVIATION_THRESHOLD": 0.002,
+                // 0.2%
+                "HIGH_DEVIATION_THRESHOLD": 0.001,
+                // 0.1%
+                "LOW_DEVIATION_THRESHOLD": 0.001,
+                // 0.1%
+                "CLOSE_DEVIATION_THRESHOLD": 0.0005
+                // 0.05%
+            }
+            // ETHUSDT 没有在这里配置，因此它将完全使用上面的全局默认值。
+        },
+        // --- 新增：K线一字线告警配置 ---
+        "ONE_LINE_KLINE_ALERT_ENABLED": true,
+        // 一字线告警总开关
+        // 全局默认阈值：允许连续出现 2 条一字线
+        "ONE_LINE_KLINE_COUNT": 2,
+        // --- 标的特定阈值 (SYMBOL_THRESHOLDS) ---
+
+    },
+    // ... 其他配置 ...
+        "LARK_APP_CONFIG": {
+            "APP_ID": "*********",
+            "APP_SECRET": "*********",
+            "ALERT_CHAT_ID": "*********"
+            // ⚠️ 必须是群聊ID
+        },
+        "ALERT_CONFIG": {
+            "LARK_WEBHOOK_URL": null
+            // Webhook 已不再使用
+            // ...
+        }
+}
