@@ -5,10 +5,10 @@
     "MYSQL_CONFIG": {
         "HOST": "localhost",
         "PORT": 3306,
-        "USER": ,
-        "PASSWORD":  ,
+        "USER": "monitor_user",
+        "PASSWORD": "monitorforBitda2025.",
         // 请替换为你的数据库密码
-        "DATABASE": "*****"
+        "DATABASE": "monitor"
     },
     // -------------------------------------------------------------------------
     // 数据库表名配置
@@ -51,7 +51,7 @@
         "SANDUSDT",
         "DYDXUSDT",
         "XTZUSDT",
-
+        "BNBUSDT", 
 
         // 添加更多合约，例如 "SOLUSDT"
     ],
@@ -100,7 +100,7 @@
         // 0.05%
 
         // 交易量阈值
-        "VOLUME_RATIO_THRESHOLD": 0.10,
+        "VOLUME_RATIO_THRESHOLD": 0.25,
         // 10%
 
         // 资金费率差异阈值
@@ -109,16 +109,16 @@
 
         // --- 标的特定阈值 (覆盖全局配置 - 最高优先级) ---
         "SYMBOL_THRESHOLDS": {
-            "SOLUSDT": {
+            "DYDXUSDT": {
                 // 覆盖全局 CLOSE 阈值：对 BTC 收盘价检查更严格
                 "OPEN_DEVIATION_THRESHOLD": 0.002,
-                // 0.2%
+                // 0.8%
                 "HIGH_DEVIATION_THRESHOLD": 0.001,
-                // 0.1%
+                // 0.8%
                 "LOW_DEVIATION_THRESHOLD": 0.001,
-                // 0.1%
+                // 0.8%
                 "CLOSE_DEVIATION_THRESHOLD": 0.0005
-                // 0.05%
+                // 0.8%
             }
             // ETHUSDT 没有在这里配置，因此它将完全使用上面的全局默认值。
         },
@@ -126,15 +126,15 @@
         "ONE_LINE_KLINE_ALERT_ENABLED": true,
         // 一字线告警总开关
         // 全局默认阈值：允许连续出现 2 条一字线
-        "ONE_LINE_KLINE_COUNT": 2,
+        "ONE_LINE_KLINE_COUNT": 4,
         // --- 标的特定阈值 (SYMBOL_THRESHOLDS) ---
 
     },
     // ... 其他配置 ...
         "LARK_APP_CONFIG": {
-            "APP_ID": "*********",
-            "APP_SECRET": "*********",
-            "ALERT_CHAT_ID": "*********"
+            "APP_ID": "cli_a81704fac278502e",
+            "APP_SECRET": "USBemMxGbVJFR56Ihm5uJbOVSlXOMQcV",
+            "ALERT_CHAT_ID": "oc_af99c23eeef33ff2f15e8ccac4824b39"
             // ⚠️ 必须是群聊ID
         },
         "ALERT_CONFIG": {
