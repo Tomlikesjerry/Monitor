@@ -8,3 +8,4 @@ monitor/
 __pycache__/
 *.pyc
 *.json
+/monitor
