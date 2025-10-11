@@ -7,6 +7,26 @@
 # 如果您使用模板指导，则可以保留模板
 # config.json.template
 
+
+# 忽略虚拟环境文件夹
+monitor/
+
+# 忽略日志文件
+*.log
+logs/
+log/
+*.log.*
+
+# 忽略 Vim 临时文件
+*.swp
+*.swo
+*.swn
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+
 # 日志文件 (通常在服务器上生成，不应提交)
 *.log
 logs/
