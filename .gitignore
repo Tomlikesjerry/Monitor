@@ -12,6 +12,14 @@
 logs/
 log/
 
+# 忽略所有日志文件
+*.log
+
+# 忽略日志目录（如果你专门有 log 文件夹）
+logs/
+log/
+*.log.*
+
 # 数据库文件 (如果是使用 SQLite 或其他本地数据库)
 *.sqlite
 *.db
