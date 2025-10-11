@@ -1,166 +1,237 @@
-import requests
-import logging
+# platform_connector.py
 import time
+import logging
 from datetime import datetime
+from typing import List, Optional, Any, Dict
 
-# 获取 logger 实例，与主脚本使用相同的日志配置
+import requests
+
 logger = logging.getLogger('monitor_system')
 
-# K线数据的索引映射（标准 OHLCV 格式）
-# 确保与你 MySQL 写入逻辑中的索引对应
-OHLCV_INDEX = {
-    'timestamp': 0,
-    'open': 1,
-    'high': 2,
-    'low': 3,
-    'close': 4,
-    'volume': 5,
-    'quote_volume': 6
-}
 
-# 假设 K线 API 路径，请根据你的 BITDA 实际 API 路径调整
-# 示例：如果是 /api/v3/klines，那么 API 完整 URL 是 api_base_url + KLINE_API_PATH
-KLINE_API_PATH = "/api/v2/klines"
+def _fmt_ms(ms: Optional[int]) -> str:
+    if ms is None:
+        return "None"
+    try:
+        return f"{ms} ({datetime.fromtimestamp(ms/1000).strftime('%Y-%m-%d %H:%M:%S')})"
+    except Exception:
+        return str(ms)
+
+
+def _safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
 
 
 class PlatformConnector:
     """
-    交易所数据连接器，负责处理 API 请求和数据转换。
-    此版本适用于不支持 limit 参数的 API，并包含重试机制。
+    统一接口：
+      fetch_ohlcv_history(symbol, timeframe, start_time_ms=None) -> [[ts_ms, open, high, low, close, volume], ...]
     """
 
-    def __init__(self, platform_id, api_base_url):
-        self.platform_id = platform_id
-        self.api_base_url = api_base_url
-        logger.info(f"Connector initialized for {platform_id} @ {api_base_url}")
+    # timeframe 映射
+    _TF_MAP_BITDA = {
+        "1m": "1min", "3m": "3min", "5m": "5min",
+        "15m": "15min", "30m": "30min",
+        "1h": "1hour", "4h": "4hour", "6h": "6hour", "12h": "12hour",
+        "1d": "1day", "1w": "1week"
+    }
+    _TF_MAP_BINANCE = {
+        "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h", "12h": "12h",
+        "1d": "1d", "1w": "1w"
+    }
 
-    def _convert_symbol(self, symbol):
-        """将标准格式 (如 BTC/USDT) 转换为交易所要求的格式 (如 BTCUSDT)。"""
-        # 🚨 请根据 BITDA 的实际要求调整这里的转换逻辑
-        return symbol.replace('/', '')
+    # timeframe → 秒（便于计算 end_time）
+    _TF_TO_SECONDS = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200,
+        "1d": 86400, "1w": 604800
+    }
 
-    def fetch_ohlcv_history(self, symbol, timeframe, start_time_ms=None):
+    # 如需符号映射（某平台命名不同），可在此配置
+    _SYMBOL_MAP: Dict[str, Dict[str, str]] = {
+        # "BITDA_FUTURES": {"ETHUSDT": "ETH_USDT"},
+        # "BINANCE_FUTURES": {}
+    }
 
-        exchange_symbol = self._convert_symbol(symbol)
-        params = {}
+    # 为 BITDA 计算 end_time 时使用的窗口大小（根数）
+    _BITDA_WINDOW_CANDLES = 200  # 可按需调整
 
-        # 1. 核心逻辑：根据平台 ID 确定固定的 URL 和可变的参数名
-        if self.platform_id == 'BITDA_FUTURES':
-            # 🚨 固定 URL 路径
-            url = f"{self.api_base_url}/open/api/v2/market/kline"
+    def __init__(self, platform_id: str, base_url: str, timeout: int = 10):
+        self.platform_id = platform_id.upper().strip()
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.session = requests.Session()
 
-            # 🚨 固定参数名和参数值转换
-            params['market'] = exchange_symbol  # 标的参数名
-            params['type'] = '1min' if timeframe == '1m' else timeframe  # 周期参数名和值
+        # 调试/诊断字段
+        self.last_request: Dict[str, Any] = {}
+        self.last_response_status: Optional[int] = None
+        self.last_response_text: Optional[str] = None
+        self.last_error: Optional[str] = None
 
-        elif self.platform_id == 'BINANCE_FUTURES':
-            # 🚨 固定 URL 路径 (请确保这个路径是正确的)
-            url = f"{self.api_base_url}/fapi/v1/klines"
+        # 简单限速（避免 1r/s 限速触发）
+        self._last_call_ts: float = 0.0
+        self._min_interval_sec: float = 1.05  # 保守 >1s
 
-            # 🚨 固定参数名
-            params['symbol'] = exchange_symbol
-            params['interval'] = timeframe
+    # ======= 公共入口 =======
+    def fetch_ohlcv_history(self, symbol: str, timeframe: str, start_time_ms: Optional[int] = None) -> Optional[List[list]]:
+        # 限速
+        self._throttle()
 
-        else:
-            logger.error(f"不支持的交易所 ID: {self.platform_id}. 无法构造 API 请求。")
-            return None
+        # 清理调试字段
+        self.last_request = {}
+        self.last_response_status = None
+        self.last_response_text = None
+        self.last_error = None
 
-        # 2. 统一添加 start_time_ms 参数
-        if start_time_ms:
-            params['startTime'] = start_time_ms
+        # 符号映射
+        symbol_real = self._SYMBOL_MAP.get(self.platform_id, {}).get(symbol, symbol)
 
-        # --- 3. 发送请求 (新增重试机制) ---
-        max_retries = 3
-        retry_delay_seconds = 2  # 初始等待时间
-
-        response = None
-        status_code = None  # 初始化 status_code
-
-        for attempt in range(max_retries):
-            try:
-                # 尝试请求
-                response = requests.get(url, params=params, timeout=10)
-
-                # 如果成功，获取状态码并检查 4xx/5xx
-                status_code = response.status_code
-                response.raise_for_status()
-
-                # 如果成功 (状态码 200)，退出重试循环
-                break
-
-            except requests.exceptions.HTTPError as e:
-                # 捕获 4xx/5xx 错误（由 raise_for_status 抛出）
-                # 此时 status_code 已经被正确赋值为 int
-
-                # 🚨 修复 1: 确保 status_code 是 int 才能比较
-                if isinstance(status_code, int):
-                    # 判定是否为不可重试的错误 (例如 401/403，排除 429)
-                    is_unrecoverable_4xx = status_code >= 400 and status_code < 500 and status_code != 429
-                else:
-                    # 理论上 HTTPError 应该伴随 status_code，以防万一
-                    is_unrecoverable_4xx = True
-
-                if attempt == max_retries - 1 or is_unrecoverable_4xx:
-                    # 记录最终错误并返回 None
-                    logger.error(f"[{self.platform_id}][{symbol}] 请求 API 最终失败 (Code: {status_code}): {e}")
-                    return None
-
-                # 针对可重试的 5xx 或 429 错误，进行等待和重试
-                logger.warning(
-                    f"[{self.platform_id}][{symbol}] 请求 API 失败 (Code: {status_code})，"
-                    f"将在 {retry_delay_seconds} 秒后重试 (尝试 {attempt + 1}/{max_retries})."
-                )
-                time.sleep(retry_delay_seconds)
-                retry_delay_seconds *= 2  # 指数退避 (2, 4, 8 秒)
-
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                # 捕获连接错误或超时，此时 response 是 None 或不完整，status_code 保持 None
-
-                if attempt == max_retries - 1:
-                    logger.error(f"[{self.platform_id}][{symbol}] 请求 API 最终失败 (网络/超时): {e}")
-                    return None
-
-                logger.warning(
-                    f"[{self.platform_id}][{symbol}] 请求 API 失败 (网络/超时)，"
-                    f"将在 {retry_delay_seconds} 秒后重试 (尝试 {attempt + 1}/{max_retries})."
-                )
-                time.sleep(retry_delay_seconds)
-                retry_delay_seconds *= 2  # 指数退避
-
-            except requests.exceptions.RequestException as e:
-                # 捕获所有其他 requests 异常（如 TooManyRedirects）
-                logger.error(f"[{self.platform_id}][{symbol}] 请求 API 发生未知 RequestException: {e}")
-                return None
-
-
-        else:
-            # 如果循环结束仍未 break (表示所有重试都失败了)
-            logger.error(f"[{self.platform_id}][{symbol}] 超过最大重试次数，请求失败。")
-            return None
-
-        # --- 4. 数据解析 (位于重试循环之后) ---
         try:
-            data = response.json()
-
-            # 统一的数据封装/错误处理逻辑
-            if isinstance(data, dict) and 'code' in data:
-                if data['code'] != 0:
-                    logger.error(f"[{self.platform_id}][{symbol}] API 业务错误: Code={data['code']}, Msg={data['msg']}")
-                    return None
-                else:
-                    # BITDA 风格：Code=0, 成功数据在 data 字段中
-                    if 'data' in data and isinstance(data['data'], list):
-                        return data['data']
-                    else:
-                        return []  # 避免 BITDA 成功但数据为空的情况
-
-            # 兼容 Binance 风格：成功时直接返回 K线列表
-            if isinstance(data, list):
-                return data
+            if self.platform_id.startswith("BINANCE"):
+                data = self._fetch_binance(symbol_real, timeframe, start_time_ms)
+            elif self.platform_id.startswith("BITDA"):
+                data = self._fetch_bitda(symbol_real, timeframe, start_time_ms)
             else:
-                logger.warning(f"[{self.platform_id}][{symbol}] API 返回数据格式不符合预期。完整响应: {data}")
-                return None
-
+                raise NotImplementedError(f"未知平台: {self.platform_id}")
+            return data
         except Exception as e:
-            logger.error(f"[{self.platform_id}][{symbol}] 处理 API 数据时发生未知错误: {e}")
+            self.last_error = f"{type(e).__name__}: {e}"
+            logger.error(f"[{self.platform_id}] fetch_ohlcv_history 失败：{self.last_error} | req={self.last_request}", exc_info=True)
             return None
+        finally:
+            self._last_call_ts = time.time()
+
+    # ======= 平台实现：BINANCE（期货）=======
+    def _fetch_binance(self, symbol: str, timeframe: str, start_time_ms: Optional[int]) -> List[list]:
+        interval = self._TF_MAP_BINANCE.get(timeframe, timeframe)
+        url = f"{self.base_url}/fapi/v1/klines"
+        params = {"symbol": symbol, "interval": interval}
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+
+        self.last_request = {
+            "platform": self.platform_id, "url": url, "params": params,
+        }
+
+        resp = self.session.get(url, params=params, timeout=self.timeout)
+        self.last_response_status = resp.status_code
+        self.last_response_text = resp.text[:5000]
+        resp.raise_for_status()
+
+        data = resp.json()
+        out = []
+        for item in data:
+            if not isinstance(item, list) or len(item) < 6:
+                continue
+            ts_ms = int(item[0])
+            o = _safe_float(item[1]); h = _safe_float(item[2]); l = _safe_float(item[3]); c = _safe_float(item[4]); v = _safe_float(item[5])
+            out.append([ts_ms, o, h, l, c, v])
+        return out
+
+    # ======= 平台实现：BITDA =======
+    def _fetch_bitda(self, symbol: str, timeframe: str, start_time_ms: Optional[int]) -> List[list]:
+        tf_std = timeframe.strip().lower()
+        tf_bitda = self._TF_MAP_BITDA.get(tf_std, tf_std)
+        tf_sec = self._TF_TO_SECONDS.get(tf_std, 60)  # 默认按1m
+
+        url = f"{self.base_url}/open/api/v2/market/kline"
+
+        def _do_request(use_start: bool) -> List[list]:
+            params = {"market": symbol, "type": tf_bitda}
+            if use_start and start_time_ms is not None:
+                start_sec = int(start_time_ms // 1000)
+                # 计算 end_time：窗口若干根，且不能超过“当前 - 1个周期”
+                now_sec = int(time.time())
+                end_sec = start_sec + self._BITDA_WINDOW_CANDLES * tf_sec
+                end_sec = min(end_sec, now_sec - tf_sec)  # BITDA 有些实现要求 end < now
+                if end_sec <= start_sec:
+                    end_sec = start_sec + tf_sec  # 至少一个周期
+                params["start_time"] = start_sec
+                params["end_time"] = end_sec
+
+            self.last_request = {
+                "platform": self.platform_id,
+                "url": url,
+                "params": params,
+                "start_time_str": _fmt_ms(start_time_ms) if use_start and start_time_ms is not None else None,
+            }
+
+            resp = self.session.get(url, params=params, timeout=self.timeout)
+            self.last_response_status = resp.status_code
+            self.last_response_text = resp.text[:5000]
+            resp.raise_for_status()
+
+            j = resp.json()
+            code = j.get("code")
+            # code 为 0 或不返回 code 视为成功
+            if code not in (0, "0", None):
+                # 将错误抛出，外层做回退
+                raise RuntimeError(f"BITDA API 返回错误 code={code}, msg={j.get('msg')}")
+
+            raw = j.get("data", [])
+            items = self._flatten_bitda_data(raw)
+            out = []
+            for obj in items:
+                if isinstance(obj, dict):
+                    ts_ms = int(obj.get("time"))
+                    o = _safe_float(obj.get("open")); h = _safe_float(obj.get("high")); l = _safe_float(obj.get("low"))
+                    c = _safe_float(obj.get("close")); v = _safe_float(obj.get("volume"))
+                elif isinstance(obj, list) and len(obj) >= 6:
+                    ts_ms = int(obj[0]); o = _safe_float(obj[1]); h = _safe_float(obj[2])
+                    l = _safe_float(obj[3]); c = _safe_float(obj[4]); v = _safe_float(obj[5])
+                else:
+                    continue
+                out.append([ts_ms, o, h, l, c, v])
+            return out
+
+        # 先尝试带 start/end（更高效的增量）
+        try:
+            data = _do_request(use_start=True)
+            if data:
+                return data
+        except RuntimeError as e:
+            # 如果是 time interval invalid（code=10014），回退到“最近窗口（不带 start/end）”
+            if "10014" in str(e) or "interval invalid" in str(e).lower():
+                logger.warning(f"[{self.platform_id}] BITDA 带 start/end 失败（{e}），回退为最近窗口拉取。")
+            else:
+                # 其他错误也回退尝试一次
+                logger.warning(f"[{self.platform_id}] BITDA 带 start/end 失败（{e}），尝试最近窗口拉取。")
+        except Exception as e:
+            logger.warning(f"[{self.platform_id}] BITDA 带 start/end 请求异常（{e}），尝试最近窗口拉取。")
+
+        # 回退：不带 start/end，取最近窗口（由交易所默认 limit 决定）
+        try:
+            data = _do_request(use_start=False)
+            return data
+        except Exception as e:
+            # 回退仍失败，抛给上层记录
+            raise
+
+    @staticmethod
+    def _flatten_bitda_data(raw: Any) -> List[Any]:
+        """
+        尽量把 BITDA 的 data 解成一维列表（元素为字典/数组）。
+        支持：
+          - [ [ {...}, {...} ] ]
+          - [ {...}, {...} ]
+          - []
+        """
+        if not isinstance(raw, list):
+            return []
+        if raw and all(isinstance(x, list) for x in raw):
+            flat = []
+            for sub in raw:
+                flat.extend(sub if isinstance(sub, list) else [])
+            return flat
+        return raw
+
+    # ======= 内部：简单限速 =======
+    def _throttle(self):
+        now = time.time()
+        delta = now - self._last_call_ts
+        if delta < self._min_interval_sec:
+            time.sleep(self._min_interval_sec - delta)

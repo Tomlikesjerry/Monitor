@@ -1,11 +1,30 @@
-*.swp
-*.swo
-*.swn
-*.log
-*.log.*
-logs/
-monitor/
+# Python 缓存/构建
 __pycache__/
 *.pyc
-*.json
-/monitor
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+# 如果服务器 venv 目录名是 monitor，并且它是仓库根目录下的子目录，则取消下一行注释
+# /monitor/
+
+# 编辑器/系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+*log.log
+
+# 配置（仓库只放模板）
+config.toml
+
+# 可选：环境变量文件
+.env
