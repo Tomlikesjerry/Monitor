@@ -251,7 +251,9 @@ def render_lark_summary_chunks(report_date_str: str,
 
     for sym, d in per_symbol.items():
         c = d['price']['counts']
-        total_price_ex += (c['OPEN'] + c['HIGH'] + c['LOW'] + c['CLOSE'])
+        # 四价越阈总次数（行首要显示的数字）
+        total_ex_sym = c['OPEN'] + c['HIGH'] + c['LOW'] + c['CLOSE']
+        total_price_ex += total_ex_sym
 
         vol = d['volume']
         r   = d['volume_ratio']
@@ -259,7 +261,10 @@ def render_lark_summary_chunks(report_date_str: str,
         dev = vol['diff_rel']
         dev_str = _fmt_pct(dev)
 
-        line = f"{sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | Vol dev={dev_str} (r={r:.2f})"
+        # 在行首加上 [总次数]
+        line = f"[{total_ex_sym}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | Vol dev={dev_str} (r={r:.2f})"
+
+        # 维持原有逻辑：成交量若超阈则标记并优先展示
         if abs(dev) > tol:
             line += " 【EXCEED】"
             exceed_lines.append(line)
@@ -351,8 +356,16 @@ def main():
         per_symbol: Dict[str, dict] = {}
 
         for sym in symbols:
+            # 读取阈值 & 成交量参数
             price_thr = read_price_thresholds(config, sym)
             vol_ratio, vol_tol = read_volume_params(config, sym)
+
+            # ---- 新增：阈值调试日志（确认生效的最终值）----
+            logger.info(
+                f"[{sym}] 阈值确认 | OPEN={price_thr['OPEN']:.4%}, HIGH={price_thr['HIGH']:.4%}, "
+                f"LOW={price_thr['LOW']:.4%}, CLOSE={price_thr['CLOSE']:.4%} | "
+                f"VOLUME: r={vol_ratio:.2f}, tol={vol_tol:.2%}"
+            )
 
             rows_a = fetch_ohlc_in_range(conn, table, sym, A_ID, ts_mode, start_utc, end_utc)
             rows_b = fetch_ohlc_in_range(conn, table, sym, B_ID, ts_mode, start_utc, end_utc)
@@ -376,7 +389,7 @@ def main():
             f.write(md)
         logger.info(f"[日报] 已生成：{out_path}")
 
-        # 飞书摘要（覆盖所有标的，自动分条；不含本地文件提示）
+        # 飞书摘要（覆盖所有标的，自动分条）
         chunks = render_lark_summary_chunks(report_date_str, start_utc, end_utc, per_symbol)
         for title, text in chunks:
             try:
