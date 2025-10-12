@@ -11,9 +11,9 @@ MONITORED_SYMBOLS = [
 [MYSQL_CONFIG]
 HOST = "localhost"
 PORT = 3306
-USER = ""
-PASSWORD = ""        # ⚠️ 请填入你的数据库密码
-DATABASE = ""
+USER = "monitor_user"
+PASSWORD = "monitorforBitda2025."        # ⚠️ 请填入你的数据库密码
+DATABASE = "monitor"
 
 # ================================
 # 数据库表名配置
@@ -44,9 +44,9 @@ FREQUENCY_SECONDS = 60                     # 主循环频率（秒）
 # 飞书应用配置（推荐）
 # ================================
 [LARK_APP_CONFIG]
-APP_ID = ""            # 你的 Feishu App ID
-APP_SECRET = ""        # 你的 Feishu App Secret
-ALERT_CHAT_ID = ""     # ⚠️ 群聊 chat_id（接收告警）
+APP_ID = "cli_a81704fac278502e"            # 你的 Feishu App ID
+APP_SECRET = "ddg3ci3vZgSNu20GeRyBPexyoWFAPm2F"        # 你的 Feishu App Secret
+ALERT_CHAT_ID = "oc_af99c23eeef33ff2f15e8ccac4824b39"     # ⚠️ 群聊 chat_id（接收告警）
 LARK_REGION = "larksuite"
 
 # ================================
