@@ -4,7 +4,6 @@ import sys
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Union
-
 import pymysql
 from utils import load_config, init_db
 
@@ -15,6 +14,13 @@ except ImportError:
     def send_teams_alert(*args, **kwargs):
         logging.getLogger('monitor_system').warning("teams_alerter 未找到，跳过 Teams 发送。")
 
+# --- 可选：Lark ---
+try:
+    from lark_alerter import send_lark_alert
+except ImportError:
+    def send_lark_alert(*args, **kwargs):
+        logging.getLogger('monitor_system').warning("lark_alerter 未找到，跳过 Lark 发送。")
+
 logger = logging.getLogger('monitor_system')
 
 # ---------- 日志 ----------
@@ -22,19 +28,15 @@ def setup_logging():
     if logger.handlers:
         return
     logger.setLevel(logging.INFO)
-    fmt = logging.Formatter(
-        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    fmt = logging.Formatter('%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+                            datefmt='%Y-%m-%d %H:%M:%S')
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
-
     log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'daily_report_log.log')
     fh = logging.FileHandler(log_file, encoding='utf-8')
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
-
     root = logging.getLogger('monitor_system')
     root.addHandler(ch)
     root.addHandler(fh)
@@ -88,6 +90,120 @@ def detect_ts_mode(conn, table: str) -> str:
     ts = row[0] if isinstance(row, (list, tuple)) else row.get('timestamp')
     return TsMode.DATETIME if isinstance(ts, datetime) else TsMode.MS_INT
 
+def make_range_predicate(ts_mode: str, start_utc: datetime, end_utc: datetime):
+    if ts_mode == TsMode.DATETIME:
+        return "timestamp >= %s AND timestamp < %s", (start_utc, end_utc)
+    else:
+        return "timestamp >= %s AND timestamp < %s", (
+            int(start_utc.timestamp() * 1000), int(end_utc.timestamp() * 1000))
+
+# ---------- 阈值读取 ----------
+def read_price_thresholds(config: dict, symbol: str) -> Dict[str, float]:
+    ac = (config or {}).get('ALERT_CONFIG', {}) or {}
+    sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
+    sym_conf = sym_map.get(symbol) or {}
+
+    def pick(name: str, default: float) -> float:
+        sv, _ = _ci_get(sym_conf, name)
+        gv, _ = _ci_get(ac, name)
+        val = sv if sv is not None else (gv if gv is not None else default)
+        try:
+            return float(val)
+        except Exception:
+            return default
+
+    return {
+        "OPEN":  pick('OPEN_DEVIATION_THRESHOLD',  0.002),
+        "HIGH":  pick('HIGH_DEVIATION_THRESHOLD',  0.001),
+        "LOW":   pick('LOW_DEVIATION_THRESHOLD',   0.001),
+        "CLOSE": pick('CLOSE_DEVIATION_THRESHOLD', 0.0005),
+    }
+
+def read_volume_params(config: dict, symbol: str) -> Tuple[float, float]:
+    ac = (config or {}).get('ALERT_CONFIG', {}) or {}
+    sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
+    sym_conf = sym_map.get(symbol) or {}
+    tr_sym, _ = _ci_get(sym_conf, 'VOLUME_TARGET_RATIO')
+    tr_glb, _ = _ci_get(ac, 'VOLUME_TARGET_RATIO')
+    target_ratio = tr_sym if tr_sym is not None else (tr_glb if tr_glb is not None else 0.20)
+    tol_sym, _ = _ci_get(sym_conf, 'VOLUME_RATIO_THRESHOLD')
+    tol_glb, _ = _ci_get(ac, 'VOLUME_RATIO_THRESHOLD')
+    tolerance = tol_sym if tol_sym is not None else (tol_glb if tol_glb is not None else 0.20)
+    try:
+        return float(target_ratio), float(tolerance)
+    except Exception:
+        return 0.2, 0.2
+
+# ---------- DB 拉取 ----------
+def fetch_ohlc_in_range(conn, table: str, symbol: str, exchange: str,
+                        ts_mode: str, start_utc: datetime, end_utc: datetime) -> List[dict]:
+    where, params = make_range_predicate(ts_mode, start_utc, end_utc)
+    sql = f"""
+        SELECT timestamp, `open`, `high`, `low`, `close`, volume
+        FROM {table}
+        WHERE symbol=%s AND exchange=%s AND {where}
+        ORDER BY timestamp ASC
+    """
+    args = (symbol, exchange, *params)
+    with conn.cursor(cursor=pymysql.cursors.DictCursor) as c:
+        c.execute(sql, args)
+        return c.fetchall() or []
+
+# ---------- 统计 ----------
+def aggregate_daily_for_symbol(rows_a: List[dict], rows_b: List[dict],
+                               price_thresholds: Dict[str, float],
+                               volume_target_ratio: float):
+    map_a = {r['timestamp']: r for r in rows_a}
+    map_b = {r['timestamp']: r for r in rows_b}
+    commons = sorted(set(map_a.keys()) & set(map_b.keys()))
+
+    counts = {'OPEN': 0, 'HIGH': 0, 'LOW': 0, 'CLOSE': 0}
+    exceeds: List[dict] = []
+
+    def check(field_key: str, a_val, b_val, thr, ts):
+        if b_val is None or _to_float(b_val) == 0.0:
+            return
+        rel = abs(_to_float(a_val) - _to_float(b_val)) / abs(_to_float(b_val))
+        if rel > thr:
+            counts[field_key] += 1
+            exceeds.append({'ts': ts, 'field': field_key, 'a': a_val, 'b': b_val, 'rel': rel})
+
+    for ts in commons:
+        ra, rb = map_a[ts], map_b[ts]
+        for field in ['open', 'high', 'low', 'close']:
+            check(field.upper(), ra[field], rb[field], price_thresholds[field.upper()], ts)
+
+    sum_a = sum(_to_float(map_a[t]['volume']) for t in commons)
+    sum_b = sum(_to_float(map_b[t]['volume']) for t in commons)
+    target = sum_b * volume_target_ratio
+    diff_abs = sum_a - target
+    diff_rel = diff_abs / target if target else 0.0
+    volume_stats = {
+        'A_sum': sum_a, 'B_sum': sum_b,
+        'target': target, 'diff_abs': diff_abs, 'diff_rel': diff_rel
+    }
+    return {'counts': counts, 'exceeds': exceeds}, volume_stats
+
+# ---------- Markdown 渲染 ----------
+def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[str, dict]) -> List[Tuple[str, str]]:
+    lines_all = []
+    total_price_ex = sum(sum(v['price']['counts'].values()) for v in per_symbol.values())
+    vol_exceed_count = sum(1 for v in per_symbol.values() if abs(v['volume']['diff_rel']) > v['volume_tolerance'])
+    header = (
+        f"📊 日报（K线+成交量统计）UTC {report_date_str}\n\n"
+        f"时间：{start_utc.strftime('%Y-%m-%d %H:%M')} ~ {end_utc.strftime('%Y-%m-%d %H:%M')} UTC\n"
+        f"标的数：{len(per_symbol)}\n"
+        f"四价越阈总次数：{total_price_ex}\n"
+        f"成交量超阈标的数：{vol_exceed_count}\n\n"
+    )
+    lines_all.append(header)
+    for sym, v in per_symbol.items():
+        c = v['price']['counts']
+        dev = v['volume']['diff_rel']
+        r = v['volume_ratio']
+        lines_all.append(f"[{sum(c.values())}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | Vol dev={_fmt_pct(dev)} (r={r:.2f})")
+    return [(f"📊 日报（K线+成交量统计）UTC {report_date_str}", "\n".join(lines_all))]
+
 # ---------- 主流程 ----------
 def main():
     setup_logging()
@@ -95,15 +211,8 @@ def main():
     try:
         config = load_config()
         conn = init_db(config)
-        try:
-            conn.autocommit(True)
-            with conn.cursor() as c:
-                c.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        except Exception:
-            pass
-
         teams_cfg = config.get('TEAMS_NOTIFY') or {}
-        lark_cfg  = config.get('LARK_APP_CONFIG') or {}
+        lark_cfg = config.get('LARK_APP_CONFIG') or {}
 
         table = (config.get('TABLE_NAMES') or {}).get('KLINE_DATA') or 'kline_data'
         ex = config.get('EXCHANGE_CONFIG') or {}
@@ -115,62 +224,36 @@ def main():
             logger.critical("配置缺少 MONITORED_SYMBOLS。")
             return
 
-        # UTC 昨天区间
         today_utc = datetime.now(timezone.utc).date()
         start_utc = datetime.combine(today_utc - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-        end_utc   = datetime.combine(today_utc, datetime.min.time(), tzinfo=timezone.utc)
+        end_utc = datetime.combine(today_utc, datetime.min.time(), tzinfo=timezone.utc)
         report_date_str = (today_utc - timedelta(days=1)).strftime("%Y-%m-%d")
 
         ts_mode = detect_ts_mode(conn, table)
         logger.info(f"[日报] 时间范围（UTC）：{start_utc} ~ {end_utc} | ts_mode={ts_mode}")
 
-        # 汇总结果容器
         per_symbol: Dict[str, dict] = {}
-
-        # 遍历所有标的
         for sym in symbols:
             price_thr = read_price_thresholds(config, sym)
             vol_ratio, vol_tol = read_volume_params(config, sym)
-            logger.info(
-                f"[{sym}] 阈值确认 | OPEN={price_thr['OPEN']:.4%}, HIGH={price_thr['HIGH']:.4%}, "
-                f"LOW={price_thr['LOW']:.4%}, CLOSE={price_thr['CLOSE']:.4%} | "
-                f"VOLUME: r={vol_ratio:.2f}, tol={vol_tol:.2%}"
-            )
-
             rows_a = fetch_ohlc_in_range(conn, table, sym, A_ID, ts_mode, start_utc, end_utc)
             rows_b = fetch_ohlc_in_range(conn, table, sym, B_ID, ts_mode, start_utc, end_utc)
-
             price_stats, volume_stats = aggregate_daily_for_symbol(rows_a, rows_b, price_thr, vol_ratio)
-            per_symbol[sym] = {
-                'price': price_stats,
-                'volume': volume_stats,
-                'volume_ratio': vol_ratio,
-                'volume_tolerance': vol_tol,
-            }
+            per_symbol[sym] = {'price': price_stats, 'volume': volume_stats,
+                               'volume_ratio': vol_ratio, 'volume_tolerance': vol_tol}
 
-        # 写日报文件
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        out_dir  = os.path.join(base_dir, "daily_report_kline_volume")
+        out_dir = os.path.join(base_dir, "daily_report_kline_volume")
         os.makedirs(out_dir, exist_ok=True)
-        md = render_markdown(report_date_str, timeframe, start_utc, end_utc, per_symbol)
-        out_name = f"daily_report_{report_date_str}_UTC.md"
-        out_path = os.path.join(out_dir, out_name)
+        out_path = os.path.join(out_dir, f"daily_report_{report_date_str}_UTC.md")
         with open(out_path, "w", encoding="utf-8") as f:
-            f.write(md)
+            for _, text in render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol):
+                f.write(text)
         logger.info(f"[日报] 已生成：{out_path}")
 
-        # === ✅ 生成并发送真实摘要到 Teams ===
-        chunks = render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol)
-        if not chunks:
-            logger.warning("无可发送摘要（per_symbol 为空），跳过 Teams 发送。")
-        else:
-            for title, text in chunks:
-                logger.info(f"准备发送日报至 Teams: {title}")
-                try:
-                    send_teams_alert(teams_cfg, title, text, severity="info")
-                    logger.info(f"Teams 日报已发送: {title}")
-                except Exception as e:
-                    logger.warning(f"Teams 摘要发送失败：{e} | 标题={title}")
+        # 发送到 Teams
+        for title, text in render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol):
+            send_teams_alert(teams_cfg, title, text, severity="info")
 
     except Exception as e:
         logger.critical(f"日报生成失败：{e}", exc_info=True)
@@ -181,10 +264,6 @@ def main():
             except Exception:
                 pass
             logger.info("数据库连接已关闭。")
-
-if __name__ == "__main__":
-    main()
-
 
 if __name__ == "__main__":
     main()
