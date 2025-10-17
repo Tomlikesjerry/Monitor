@@ -186,6 +186,9 @@ def aggregate_daily_for_symbol(rows_a: List[dict], rows_b: List[dict],
 
 # ---------- Markdown 渲染 ----------
 def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[str, dict]) -> List[Tuple[str, str]]:
+    """
+    生成日报文本（带序号、阈值统计、成交量偏离、异常标识 ⚠️）
+    """
     total_price_ex = sum(sum(v['price']['counts'].values()) for v in per_symbol.values())
     vol_exceed_count = sum(1 for v in per_symbol.values() if abs(v['volume']['diff_rel']) > v['volume_tolerance'])
 
@@ -197,19 +200,41 @@ def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[
         f"成交量超阈标的数：{vol_exceed_count}\n\n"
     )
 
-    # 每个标的单独换行，使用 Markdown 两个空格 + \n 强制换行
+    # 按符号名称排序
+    sorted_symbols = sorted(per_symbol.keys())
+
     body_lines = []
-    for sym, v in per_symbol.items():
+    for i, sym in enumerate(sorted_symbols, start=1):
+        v = per_symbol[sym]
         c = v['price']['counts']
         dev = v['volume']['diff_rel']
         r = v['volume_ratio']
-        body_lines.append(
-            f"[{sum(c.values())}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | "
-            f"Vol dev={_fmt_pct(dev)} (r={r:.2f})  \n"  # ← 两个空格 + \n 表示换行
+        tol = v['volume_tolerance']
+
+        # --- 统计 ---
+        total_ex = sum(c.values())  # 每个标的的四价越阈总次数
+        vol_flag = abs(dev) > tol
+        price_flag = total_ex > 100  # 超过100次算“频繁越阈”
+
+        # --- 标识符 ---
+        alert_flag = ""
+        if vol_flag and price_flag:
+            alert_flag = "⚠️⚠️"
+        elif vol_flag or price_flag:
+            alert_flag = "⚠️"
+
+        index_emoji = f"{i}️⃣" if i <= 10 else f"{i}."
+        line = (
+            f"{index_emoji} {sym}{alert_flag}: "
+            f"四价越阈={total_ex}次 | "
+            f"O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | "
+            f"Vol dev={_fmt_pct(dev)} (r={r:.2f})  \n"
         )
+        body_lines.append(line)
 
     body = header + "".join(body_lines)
     return [(f"📊 日报（K线+成交量统计）UTC {report_date_str}", body)]
+
 
 
 # ---------- 主流程 ----------
