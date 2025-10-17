@@ -187,53 +187,48 @@ def aggregate_daily_for_symbol(rows_a: List[dict], rows_b: List[dict],
 # ---------- Markdown 渲染 ----------
 def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[str, dict]) -> List[Tuple[str, str]]:
     """
-    生成日报文本（带序号、阈值统计、成交量偏离、异常标识 ⚠️）
+    生成日报摘要（Teams Markdown 优化版）
+    - 每行以 [四价越阈总次数] 开头
+    - 加粗关键字段
+    - 异常标记 ⚠️
+    - 自动换行
     """
     total_price_ex = sum(sum(v['price']['counts'].values()) for v in per_symbol.values())
     vol_exceed_count = sum(1 for v in per_symbol.values() if abs(v['volume']['diff_rel']) > v['volume_tolerance'])
 
     header = (
-        f"📊 日报（K线+成交量统计）UTC {report_date_str}\n\n"
+        f"📊 **日报（K线+成交量统计）UTC {report_date_str}**\n\n"
         f"时间：{start_utc.strftime('%Y-%m-%d %H:%M')} ~ {end_utc.strftime('%Y-%m-%d %H:%M')} UTC\n"
-        f"标的数：{len(per_symbol)}\n"
-        f"四价越阈总次数：{total_price_ex}\n"
-        f"成交量超阈标的数：{vol_exceed_count}\n\n"
+        f"标的数：**{len(per_symbol)}**\n"
+        f"四价越阈总次数：**{total_price_ex}**\n"
+        f"成交量超阈标的数：**{vol_exceed_count}**\n\n"
     )
 
-    # 按符号名称排序
+    # 排序输出
     sorted_symbols = sorted(per_symbol.keys())
 
     body_lines = []
-    for i, sym in enumerate(sorted_symbols, start=1):
+    for sym in sorted_symbols:
         v = per_symbol[sym]
         c = v['price']['counts']
         dev = v['volume']['diff_rel']
         r = v['volume_ratio']
         tol = v['volume_tolerance']
+        total_ex = sum(c.values())
 
-        # --- 统计 ---
-        total_ex = sum(c.values())  # 每个标的的四价越阈总次数
-        vol_flag = abs(dev) > tol
-        price_flag = total_ex > 100  # 超过100次算“频繁越阈”
+        alert_flag = " ⚠️" if abs(dev) > tol else ""
 
-        # --- 标识符 ---
-        alert_flag = ""
-        if vol_flag and price_flag:
-            alert_flag = "⚠️⚠️"
-        elif vol_flag or price_flag:
-            alert_flag = "⚠️"
-
-        index_emoji = f"{i}️⃣" if i <= 10 else f"{i}."
+        # 生成行文本（加粗关键信息）
         line = (
-            f"{index_emoji} {sym}{alert_flag}: "
-            f"四价越阈={total_ex}次 | "
+            f"[{total_ex}] **{sym}**{alert_flag}: "
             f"O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | "
-            f"Vol dev={_fmt_pct(dev)} (r={r:.2f})  \n"
+            f"Vol dev=**{_fmt_pct(dev)}** (r={r:.2f})  \n"
         )
         body_lines.append(line)
 
     body = header + "".join(body_lines)
     return [(f"📊 日报（K线+成交量统计）UTC {report_date_str}", body)]
+
 
 
 
