@@ -1,12 +1,12 @@
 # teams_alerter.py
-import requests, logging
+import requests
+import logging
 
 log = logging.getLogger("monitor_system")
 
 def send_teams_alert(teams_cfg: dict, title: str, text: str, severity: str = "info", timeout=8):
     """
-    直发 Power Automate（Teams Workflow）HTTP 触发器。
-    Flow 触发器的 JSON Schema 建议包含 title/text/severity 三个字段。
+    向 Teams 发送 Adaptive Card 格式的日报，保持原始排版。
     """
     if not teams_cfg or not teams_cfg.get("ENABLED"):
         return
@@ -14,7 +14,38 @@ def send_teams_alert(teams_cfg: dict, title: str, text: str, severity: str = "in
     if not url:
         log.warning("TEAMS_NOTIFY 启用但缺少 FLOW_URL，跳过发送。")
         return
-    payload = {"title": title, "text": text, "severity": severity}
+
+    # ✅ Adaptive Card payload
+    payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "size": "Large",
+                            "weight": "Bolder",
+                            "text": f"{title}",
+                            "wrap": True
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": f"```\n{text}\n```",
+                            "wrap": True,
+                            "fontType": "Monospace",
+                            "spacing": "Medium"
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
     try:
         r = requests.post(url, json=payload, timeout=timeout)
         if r.status_code >= 300:
