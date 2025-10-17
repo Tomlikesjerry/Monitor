@@ -8,11 +8,12 @@ from typing import Dict, List, Tuple, Union
 import pymysql
 from utils import load_config, init_db
 
+# ====== 改为使用 Teams 邮件通道 ======
 try:
-    from lark_alerter import send_lark_alert
+    from teams_alerter import send_teams_alert
 except ImportError:
-    def send_lark_alert(*args, **kwargs):
-        logging.getLogger('monitor_system').warning("Lark告警模块未找到，跳过发送飞书。")
+    def send_teams_alert(*args, **kwargs):
+        logging.getLogger('monitor_system').warning("teams_alerter 未找到，无法发送 Teams 邮件。")
 
 logger = logging.getLogger('monitor_system')
 
@@ -51,6 +52,8 @@ def _to_float(x) -> float:
 
 def _fmt_pct(x: float) -> str:
     try:
+        if x == float("inf"):
+            return "Inf"
         return f"{x:+.2%}"
     except Exception:
         return "N/A"
@@ -92,6 +95,7 @@ def read_price_thresholds(config: dict, symbol: str) -> Dict[str, float]:
     ac = (config or {}).get('ALERT_CONFIG', {}) or {}
     sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
     sym_conf = sym_map.get(symbol) or {}
+
     def pick(name: str, default: float) -> float:
         sv, _ = _ci_get(sym_conf, name); gv, _ = _ci_get(ac, name)
         val = sv if sv is not None else (gv if gv is not None else default)
@@ -99,6 +103,7 @@ def read_price_thresholds(config: dict, symbol: str) -> Dict[str, float]:
             return float(val)
         except Exception:
             return default
+
     return {
         "OPEN":  pick('OPEN_DEVIATION_THRESHOLD',  0.002),
         "HIGH":  pick('HIGH_DEVIATION_THRESHOLD',  0.001),
@@ -111,12 +116,15 @@ def read_volume_params(config: dict, symbol: str) -> Tuple[float, float]:
     ac = (config or {}).get('ALERT_CONFIG', {}) or {}
     sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
     sym_conf = sym_map.get(symbol) or {}
+
     tr_sym, _ = _ci_get(sym_conf, 'VOLUME_TARGET_RATIO')
     tr_glb, _ = _ci_get(ac,       'VOLUME_TARGET_RATIO')
     target_ratio = tr_sym if tr_sym is not None else (tr_glb if tr_glb is not None else 0.20)
+
     tol_sym, _ = _ci_get(sym_conf, 'VOLUME_RATIO_THRESHOLD')
     tol_glb, _ = _ci_get(ac,       'VOLUME_RATIO_THRESHOLD')
     tolerance = tol_sym if tol_sym is not None else (tol_glb if tol_glb is not None else 0.20)
+
     try:
         target_ratio = float(target_ratio)
     except Exception:
@@ -234,15 +242,15 @@ def render_markdown(report_date_str: str, timeframe: str,
         lines.append("")
     return "\n".join(lines)
 
-# ---------- 飞书摘要（全量标的，自动分条；不含本地文件提示） ----------
-def render_lark_summary_chunks(report_date_str: str,
-                               start_utc: datetime, end_utc: datetime,
-                               per_symbol: Dict[str, dict],
-                               max_chars: int = 2500) -> List[Tuple[str, str]]:
+# ---------- Teams 邮件摘要（覆盖所有标的，自动分条） ----------
+def render_email_summary_chunks(report_date_str: str,
+                                start_utc: datetime, end_utc: datetime,
+                                per_symbol: Dict[str, dict],
+                                max_chars: int = 8000) -> List[Tuple[str, str]]:
     """
-    生成【多条】飞书摘要（覆盖所有标的，不截断）。
+    生成【多条】Teams 邮件摘要（覆盖所有标的，不截断）。
     每条消息 <= max_chars（粗略控制），依次发送。
-    返回 [(title, text), ...]
+    返回 [(subject, body), ...]
     """
     total_price_ex = 0
     vol_exceed_count = 0
@@ -251,7 +259,6 @@ def render_lark_summary_chunks(report_date_str: str,
 
     for sym, d in per_symbol.items():
         c = d['price']['counts']
-        # 四价越阈总次数（行首要显示的数字）
         total_ex_sym = c['OPEN'] + c['HIGH'] + c['LOW'] + c['CLOSE']
         total_price_ex += total_ex_sym
 
@@ -264,15 +271,15 @@ def render_lark_summary_chunks(report_date_str: str,
         # 在行首加上 [总次数]
         line = f"[{total_ex_sym}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | Vol dev={dev_str} (r={r:.2f})"
 
-        # 维持原有逻辑：成交量若超阈则标记并优先展示
-        if abs(dev) > tol:
+        # 成交量若超阈则优先展示
+        if isinstance(dev, float) and abs(dev) > tol:
             line += " 【EXCEED】"
             exceed_lines.append(line)
             vol_exceed_count += 1
         else:
             normal_lines.append(line)
 
-    # 全量行（先超阈再正常）
+    # 全量行：先超阈，再正常
     lines_all: List[str] = []
     lines_all.extend(exceed_lines)
     lines_all.extend(normal_lines)
@@ -283,7 +290,7 @@ def render_lark_summary_chunks(report_date_str: str,
         f"四价越阈总次数：{total_price_ex}\n"
         f"成交量超阈标的数：{vol_exceed_count}\n\n"
     )
-    header_cont = "（续）以下为其余标的统计：\n\n"
+    header_cont = "（续）其余标的统计：\n\n"
 
     chunks: List[Tuple[str, str]] = []
     acc_lines: List[str] = []
@@ -293,16 +300,16 @@ def render_lark_summary_chunks(report_date_str: str,
         nonlocal acc_lines
         if not acc_lines:
             return
-        title = f"📊 日报（K线+成交量统计）UTC {report_date_str}（{idx}/{total}）"
+        subject = f"📊 监控日报（K线+成交量）UTC {report_date_str}（{idx}/{total}）"
         head = header_full if is_first else header_cont
         body = head + "\n".join(acc_lines)
-        chunks.append((title, body))
+        chunks.append((subject, body))
         acc_lines = []
 
     # 预分块
     for line in lines_all:
-        delta = len(line) + 1  # +换行
-        reserve = 600 if not chunks else 200  # 第一条头部较长，预留多一点
+        delta = len(line) + 1
+        reserve = 800 if not chunks else 200  # 第一封预留更多头部空间
         if (acc_len + delta + reserve) > max_chars and acc_lines:
             flush_chunk(idx=len(chunks)+1, total=9999, is_first=(len(chunks)==0))
             acc_len = 0
@@ -315,9 +322,9 @@ def render_lark_summary_chunks(report_date_str: str,
     # 修正标题里的 (i/N)
     fixed: List[Tuple[str, str]] = []
     total_n = len(chunks)
-    for i, (title, body) in enumerate(chunks, 1):
-        new_title = title.rsplit('（', 1)[0] + f"（{i}/{total_n}）"
-        fixed.append((new_title, body))
+    for i, (subject, body) in enumerate(chunks, 1):
+        new_subject = subject.rsplit('（', 1)[0] + f"（{i}/{total_n}）"
+        fixed.append((new_subject, body))
     return fixed
 
 # ---------- 主流程 ----------
@@ -344,14 +351,14 @@ def main():
             logger.critical("配置缺少 MONITORED_SYMBOLS。")
             return
 
-        # UTC 昨天区间
+        # UTC 昨天区间（每天固定统计 UTC 自然日）
         today_utc = datetime.now(timezone.utc).date()
         start_utc = datetime.combine(today_utc - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
         end_utc   = datetime.combine(today_utc, datetime.min.time(), tzinfo=timezone.utc)
         report_date_str = (today_utc - timedelta(days=1)).strftime("%Y-%m-%d")
 
         ts_mode = detect_ts_mode(conn, table)
-        logger.info(f"[日报] 时间范围（UTC）：{start_utc} ~ {end_utc} | ts_mode={ts_mode}")
+        logger.info(f"[日报] 时间范围（UTC）：{start_utc} ~ {end_utc} | ts_mode={ts_mode} | timeframe={timeframe}")
 
         per_symbol: Dict[str, dict] = {}
 
@@ -360,7 +367,7 @@ def main():
             price_thr = read_price_thresholds(config, sym)
             vol_ratio, vol_tol = read_volume_params(config, sym)
 
-            # ---- 新增：阈值调试日志（确认生效的最终值）----
+            # 阈值确认日志
             logger.info(
                 f"[{sym}] 阈值确认 | OPEN={price_thr['OPEN']:.4%}, HIGH={price_thr['HIGH']:.4%}, "
                 f"LOW={price_thr['LOW']:.4%}, CLOSE={price_thr['CLOSE']:.4%} | "
@@ -389,13 +396,14 @@ def main():
             f.write(md)
         logger.info(f"[日报] 已生成：{out_path}")
 
-        # 飞书摘要（覆盖所有标的，自动分条）
-        chunks = render_lark_summary_chunks(report_date_str, start_utc, end_utc, per_symbol)
-        for title, text in chunks:
+        # Teams 邮件摘要（覆盖所有标的，自动分条）
+        chunks = render_email_summary_chunks(report_date_str, start_utc, end_utc, per_symbol)
+        for subject, body in chunks:
             try:
-                send_lark_alert(config.get('LARK_APP_CONFIG') or {}, title, text)
+                # dedup_key 使用 “DAILY|yyyy-mm-dd”，同一天只会被邮箱线程聚合，无需强去重
+                send_teams_alert(config, subject, body, dedup_key=f"DAILY|{report_date_str}")
             except Exception as e:
-                logger.warning(f"飞书摘要发送失败：{e} | 标题={title}")
+                logger.warning(f"Teams 邮件发送失败：{e} | 主题={subject}")
 
     except Exception as e:
         logger.critical(f"日报生成失败：{e}", exc_info=True)

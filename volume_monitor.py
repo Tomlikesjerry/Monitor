@@ -9,11 +9,12 @@ from typing import Union, Tuple, Dict, Set, List
 
 from utils import load_config, init_db
 
+# ====== 改成使用 Teams 邮件通道 ======
 try:
-    from lark_alerter import send_lark_alert
+    from teams_alerter import send_teams_alert
 except ImportError:
-    def send_lark_alert(*args, **kwargs):
-        logging.getLogger('monitor_system').error("Lark告警模块未找到，无法发送通知。")
+    def send_teams_alert(*args, **kwargs):
+        logging.getLogger('monitor_system').error("teams_alerter 未找到，无法发送通知。")
 
 logger = logging.getLogger('monitor_system')
 
@@ -37,6 +38,14 @@ def setup_logging():
     root_logger = logging.getLogger('monitor_system')
     root_logger.addHandler(ch); root_logger.addHandler(fh)
     root_logger.setLevel(logging.INFO)
+
+# -------------------- 通知统一封装（当前走 Teams 邮件） --------------------
+def notify(config: dict, title: str, text: str, *, dedup_key: str = None) -> None:
+    """
+    统一通知出口：通过 Teams 频道邮箱邮件发送。
+    - dedup_key: 传给 teams_alerter，用于在其内部去重窗口内抑制重复。
+    """
+    send_teams_alert(config, title, text, dedup_key=dedup_key)
 
 # -------------------- 工具 --------------------
 def format_timestamp(ts: Union[int, float, datetime, None]) -> str:
@@ -89,12 +98,12 @@ def _read_volume_params(config: dict, symbol: str) -> Tuple[float, float, int, i
     sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
     sym_conf = sym_map.get(symbol) or {}
 
-    # 目标系数
+    # 目标系数（A 应接近 target_ratio * B）
     sym_tr_val, _ = _ci_get(sym_conf, 'VOLUME_TARGET_RATIO')
     glb_tr_val, _ = _ci_get(ac,       'VOLUME_TARGET_RATIO')
     target_ratio = sym_tr_val if sym_tr_val is not None else (glb_tr_val if glb_tr_val is not None else 0.20)
 
-    # 偏离容差
+    # 偏离容差（相对目标值）
     sym_tol_val, _ = _ci_get(sym_conf, 'VOLUME_RATIO_THRESHOLD')
     glb_tol_val, _ = _ci_get(ac,       'VOLUME_RATIO_THRESHOLD')
     tolerance = sym_tol_val if sym_tol_val is not None else (glb_tol_val if glb_tol_val is not None else 0.20)
@@ -180,7 +189,6 @@ def compare_volume_alert(conn, config):
 
     ex_conf = config['EXCHANGE_CONFIG']
     table_names = config['TABLE_NAMES']
-    lark_app_config = config['LARK_APP_CONFIG']
 
     A_ID = ex_conf['PLATFORM_A_ID'].upper()
     B_ID = ex_conf['BENCHMARK_ID'].upper()
@@ -285,7 +293,10 @@ def compare_volume_alert(conn, config):
                             f"相对偏差 = {rel_str}\n"
                             f"容差 = ±{tolerance:.0%}"
                         )
-                        send_lark_alert(lark_app_config, title, text)
+                        # >>> 改为 Teams 通知，并加去重键 <<<
+                        dedup = f"VOLUME|{symbol}|{_to_epoch_ms(ts_end)}"
+                        notify(config, title, text, dedup_key=dedup)
+
                         _LAST_ALERTED_END_TS[symbol] = ts_end
                         _LAST_ALERT_WALLCLOCK[symbol] = int(time.time())
                     else:
@@ -310,7 +321,7 @@ def main():
         config = load_config()
         conn = init_db(config)
 
-        # >>>>>>> 关键新增：读到最新数据 <<<<<<<
+        # 确保读到最新数据
         try:
             conn.autocommit(True)
         except Exception:
@@ -318,7 +329,7 @@ def main():
         try:
             with conn.cursor() as c:
                 c.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        except Exception as _:
+        except Exception:
             logger.warning("设置 READ COMMITTED 失败，使用默认隔离级别继续。")
 
         frequency = int((config.get('EXCHANGE_CONFIG') or {}).get('FREQUENCY_SECONDS', 60))
