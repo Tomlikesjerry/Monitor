@@ -10,16 +10,23 @@ from typing import Union, Dict, Tuple, List, Optional
 from utils import load_config, init_db
 from platform_connector import PlatformConnector
 
-# ====== 新增：改用 Teams 邮件通道 ======
+# --- 通知模块：Teams（必有，不存在就不报错） ---
 try:
     from teams_alerter import send_teams_alert
 except ImportError:
     def send_teams_alert(*args, **kwargs):
-        logging.getLogger('monitor_system').error("teams_alerter 未找到，无法发送通知。")
+        logging.getLogger('monitor_system').warning("teams_alerter 未找到，跳过 Teams 发送。")
+
+# --- 保留：Lark（可选） ---
+try:
+    from lark_alerter import send_lark_alert
+except ImportError:
+    def send_lark_alert(*args, **kwargs):
+        logging.getLogger('monitor_system').warning("lark_alerter 未找到，跳过 Lark 发送。")
 
 logger = logging.getLogger('monitor_system')
 
-# ================== 常量（可按需上移到 config） ==================
+# ================== 常量 ==================
 RECENT_LIMIT = 20          # 回补数量（空表/过旧或失败时回补最近N根）
 STALE_LIMIT_DAYS = 2       # 数据过旧阈值（天）
 STALE_LIMIT_MS = STALE_LIMIT_DAYS * 24 * 60 * 60 * 1000
@@ -42,14 +49,6 @@ def setup_logging():
     root_logger = logging.getLogger('monitor_system')
     root_logger.addHandler(ch); root_logger.addHandler(fh)
     root_logger.setLevel(logging.INFO)
-
-# ================== 统一通知封装（以后要并发发 Lark/Teams，只需改这里） ==================
-def notify(config: dict, title: str, text: str, *, dedup_key: str = None) -> None:
-    """
-    统一出口：当前使用 Teams 频道邮箱发送。
-    - dedup_key: 同一键在 teams_alerter 内部窗口期仅发一次（避免重复）
-    """
-    send_teams_alert(config, title, text, dedup_key=dedup_key)
 
 # ================== 小工具 ==================
 def now_ms() -> int:
@@ -289,7 +288,8 @@ def _cooldown_ok(symbol: str, kind: str, cooldown_minutes: int) -> bool:
 # ================== 价格偏差：A(BITDA) vs B(BINANCE) ==================
 def _check_price_deviation(cursor, table: str, symbol: str, A_ID: str, B_ID: str,
                            thresholds: Tuple[bool, float, float, float, float],
-                           config: dict, cooldown_min: int, interval_ms: int):
+                           app_config: dict, teams_cfg: dict,
+                           cooldown_min: int, interval_ms: int):
     enabled, th_open, th_high, th_low, th_close = thresholds
     if not enabled:
         logger.info(f"[{symbol}] 价格偏差告警关闭，跳过。")
@@ -370,14 +370,16 @@ def _check_price_deviation(cursor, table: str, symbol: str, A_ID: str, B_ID: str
         f"A({A_ID}) vs B({B_ID}) 在该根 K 线出现超阈项：\n" +
         "\n".join(lines)
     )
-    # ====== 改为 Teams 通知 ======
-    notify(config, title, text, dedup_key=f"KLINE_DEV|{symbol}|{kline_ts}")
+    # 双发（按需）
+    send_teams_alert(teams_cfg, title, text, severity="warning")
+    send_lark_alert(app_config or {}, title, text)
+
     LAST_PRICE_ALERT_END_TS[symbol] = kline_ts
 
 # ================== 一字线（仅 BITDA） ==================
 def _check_one_line(cursor, table: str, symbol: str, A_ID: str,
                     params: Tuple[bool, int, float, int, int],
-                    config: dict, interval_ms: int):
+                    app_config: dict, teams_cfg: dict, interval_ms: int):
     enabled, count_threshold, eps, require_streak, cooldown_min = params
     if not enabled:
         logger.info(f"[{symbol}] 一字线告警关闭，跳过。")
@@ -421,8 +423,8 @@ def _check_one_line(cursor, table: str, symbol: str, A_ID: str,
             f"时间范围: {format_timestamp(start_ts)} -> {formatted_end}\n"
             f"(阈值: {count_threshold} 条, epsilon={eps})"
         )
-        # ====== 改为 Teams 通知 ======
-        notify(config, title, text, dedup_key=f"ONE_LINE|{symbol}|{end_ts}")
+        send_teams_alert(teams_cfg, title, text, severity="warning")
+        send_lark_alert(app_config or {}, title, text)
         LAST_ONE_LINE_ALERT_END_TS[symbol] = end_ts
 
 # ================== 主流程 ==================
@@ -433,6 +435,8 @@ def check_kline_alerts(conn, config):
 
     ex_conf = config['EXCHANGE_CONFIG']
     table_names = config['TABLE_NAMES']
+    lark_app_config = config.get('LARK_APP_CONFIG') or {}
+    teams_cfg = config.get('TEAMS_NOTIFY') or {}
 
     A_ID = ex_conf['PLATFORM_A_ID'].upper()
     B_ID = ex_conf['BENCHMARK_ID'].upper()
@@ -462,11 +466,11 @@ def check_kline_alerts(conn, config):
             # 2) 价格偏差（最新共同K线）
             price_thresholds = _read_price_thresholds(config, symbol)
             _check_price_deviation(cursor, table_names['KLINE_DATA'], symbol, A_ID, B_ID,
-                                   price_thresholds, config, cooldown_min, interval_ms)
+                                   price_thresholds, lark_app_config, teams_cfg, cooldown_min, interval_ms)
 
             # 3) 一字线（A_ID）
             one_line_params = _read_one_line_thresholds(config, symbol)
-            _check_one_line(cursor, table_names['KLINE_DATA'], symbol, A_ID, one_line_params, config, interval_ms)
+            _check_one_line(cursor, table_names['KLINE_DATA'], symbol, A_ID, one_line_params, lark_app_config, teams_cfg, interval_ms)
 
         except pymysql.Error as db_err:
             logger.error(f"[{symbol}] 数据库失败: {db_err}", exc_info=True)

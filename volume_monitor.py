@@ -9,12 +9,19 @@ from typing import Union, Tuple, Dict, Set, List
 
 from utils import load_config, init_db
 
-# ====== 改成使用 Teams 邮件通道 ======
+# --- 通知模块：Teams（必有，不存在就不报错） ---
 try:
     from teams_alerter import send_teams_alert
 except ImportError:
     def send_teams_alert(*args, **kwargs):
-        logging.getLogger('monitor_system').error("teams_alerter 未找到，无法发送通知。")
+        logging.getLogger('monitor_system').warning("teams_alerter 未找到，跳过 Teams 发送。")
+
+# --- 保留：Lark（可选） ---
+try:
+    from lark_alerter import send_lark_alert
+except ImportError:
+    def send_lark_alert(*args, **kwargs):
+        logging.getLogger('monitor_system').warning("lark_alerter 未找到，跳过 Lark 发送。")
 
 logger = logging.getLogger('monitor_system')
 
@@ -38,14 +45,6 @@ def setup_logging():
     root_logger = logging.getLogger('monitor_system')
     root_logger.addHandler(ch); root_logger.addHandler(fh)
     root_logger.setLevel(logging.INFO)
-
-# -------------------- 通知统一封装（当前走 Teams 邮件） --------------------
-def notify(config: dict, title: str, text: str, *, dedup_key: str = None) -> None:
-    """
-    统一通知出口：通过 Teams 频道邮箱邮件发送。
-    - dedup_key: 传给 teams_alerter，用于在其内部去重窗口内抑制重复。
-    """
-    send_teams_alert(config, title, text, dedup_key=dedup_key)
 
 # -------------------- 工具 --------------------
 def format_timestamp(ts: Union[int, float, datetime, None]) -> str:
@@ -98,12 +97,12 @@ def _read_volume_params(config: dict, symbol: str) -> Tuple[float, float, int, i
     sym_map = _ci_get(ac, 'SYMBOL_THRESHOLDS')[0] or {}
     sym_conf = sym_map.get(symbol) or {}
 
-    # 目标系数（A 应接近 target_ratio * B）
+    # 目标系数
     sym_tr_val, _ = _ci_get(sym_conf, 'VOLUME_TARGET_RATIO')
     glb_tr_val, _ = _ci_get(ac,       'VOLUME_TARGET_RATIO')
     target_ratio = sym_tr_val if sym_tr_val is not None else (glb_tr_val if glb_tr_val is not None else 0.20)
 
-    # 偏离容差（相对目标值）
+    # 偏离容差
     sym_tol_val, _ = _ci_get(sym_conf, 'VOLUME_RATIO_THRESHOLD')
     glb_tol_val, _ = _ci_get(ac,       'VOLUME_RATIO_THRESHOLD')
     tolerance = sym_tol_val if sym_tol_val is not None else (glb_tol_val if glb_tol_val is not None else 0.20)
@@ -177,6 +176,9 @@ def compare_volume_alert(conn, config):
     if not bool(ac.get('VOLUME_ALERT_ENABLED', True)):
         logger.info("成交量对比已关闭（ALERT_CONFIG.VOLUME_ALERT_ENABLED=false），跳过。")
         return
+
+    teams_cfg = config.get('TEAMS_NOTIFY') or {}
+    lark_cfg  = config.get('LARK_APP_CONFIG') or {}
 
     symbols = (
         (config or {}).get('MONITORED_SYMBOLS')
@@ -265,6 +267,7 @@ def compare_volume_alert(conn, config):
             if B_sum == 0 or target_val == 0:
                 within = (A_sum == 0.0)
                 rel_str = "0.00%" if within else "Inf"
+                rel = 0.0 if within else float('inf')
             else:
                 rel = (A_sum - target_val) / target_val
                 within = abs(rel) <= tolerance
@@ -293,10 +296,8 @@ def compare_volume_alert(conn, config):
                             f"相对偏差 = {rel_str}\n"
                             f"容差 = ±{tolerance:.0%}"
                         )
-                        # >>> 改为 Teams 通知，并加去重键 <<<
-                        dedup = f"VOLUME|{symbol}|{_to_epoch_ms(ts_end)}"
-                        notify(config, title, text, dedup_key=dedup)
-
+                        send_teams_alert(config.get('TEAMS_NOTIFY') or {}, title, text, severity="warning")
+                        send_lark_alert(lark_cfg, title, text)
                         _LAST_ALERTED_END_TS[symbol] = ts_end
                         _LAST_ALERT_WALLCLOCK[symbol] = int(time.time())
                     else:
@@ -321,16 +322,13 @@ def main():
         config = load_config()
         conn = init_db(config)
 
-        # 确保读到最新数据
+        # 读已提交数据，避免幻读
         try:
             conn.autocommit(True)
-        except Exception:
-            pass
-        try:
             with conn.cursor() as c:
                 c.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
         except Exception:
-            logger.warning("设置 READ COMMITTED 失败，使用默认隔离级别继续。")
+            pass
 
         frequency = int((config.get('EXCHANGE_CONFIG') or {}).get('FREQUENCY_SECONDS', 60))
         logger.info(f"成交量监控脚本已启动，运行频率为每 {frequency} 秒一次...")
@@ -361,7 +359,6 @@ def main():
     finally:
         if conn:
             conn.close(); logger.info("数据库连接已关闭。程序退出。")
-
 
 if __name__ == '__main__':
     main()
