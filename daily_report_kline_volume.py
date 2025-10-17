@@ -400,10 +400,7 @@ def main():
                 send_teams_alert(teams_cfg, title, text, severity="info")
             except Exception as e:
                 logger.warning(f"Teams 摘要发送失败：{e} | 标题={title}")
-            try:
-                send_lark_alert(lark_cfg, title, text)
-            except Exception as e:
-                logger.warning(f"Lark 摘要发送失败：{e} | 标题={title}")
+
 
     except Exception as e:
         logger.critical(f"日报生成失败：{e}", exc_info=True)
