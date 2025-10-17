@@ -16,11 +16,7 @@ except ImportError:
         logging.getLogger('monitor_system').warning("teams_alerter 未找到，跳过 Teams 发送。")
 
 # --- 保留：Lark（可选） ---
-try:
-    from lark_alerter import send_lark_alert
-except ImportError:
-    def send_lark_alert(*args, **kwargs):
-        logging.getLogger('monitor_system').warning("lark_alerter 未找到，跳过 Lark 发送。")
+
 
 logger = logging.getLogger('monitor_system')
 
