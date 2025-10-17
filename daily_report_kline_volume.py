@@ -102,17 +102,8 @@ def main():
         except Exception:
             pass
 
-        # ✅ 打印 Teams 配置
         teams_cfg = config.get('TEAMS_NOTIFY') or {}
-        logger.info(f"[DEBUG] TEAMS CONFIG: {teams_cfg}")
-
-        # 如果未启用或缺少 URL，则直接退出
-        if not teams_cfg.get("ENABLED"):
-            logger.warning("[TEAMS] 配置未启用 (ENABLED=false 或缺失)，跳过发送。")
-            return
-        if not teams_cfg.get("FLOW_URL"):
-            logger.warning("[TEAMS] 缺少 FLOW_URL，跳过发送。")
-            return
+        lark_cfg  = config.get('LARK_APP_CONFIG') or {}
 
         table = (config.get('TABLE_NAMES') or {}).get('KLINE_DATA') or 'kline_data'
         ex = config.get('EXCHANGE_CONFIG') or {}
@@ -127,19 +118,59 @@ def main():
         # UTC 昨天区间
         today_utc = datetime.now(timezone.utc).date()
         start_utc = datetime.combine(today_utc - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-        end_utc = datetime.combine(today_utc, datetime.min.time(), tzinfo=timezone.utc)
+        end_utc   = datetime.combine(today_utc, datetime.min.time(), tzinfo=timezone.utc)
         report_date_str = (today_utc - timedelta(days=1)).strftime("%Y-%m-%d")
 
         ts_mode = detect_ts_mode(conn, table)
         logger.info(f"[日报] 时间范围（UTC）：{start_utc} ~ {end_utc} | ts_mode={ts_mode}")
 
-        # 假设这里已有你原来的报表生成逻辑，生成 Markdown 文件...
-        # --- 模拟 ---
-        fake_report = "这是一个示例日报内容，用于测试 Teams 通知。"
+        # 汇总结果容器
+        per_symbol: Dict[str, dict] = {}
 
-        # ✅ 发送到 Teams
-        logger.info("[TEAMS] 正在发送日报到 Teams...")
-        send_teams_alert(teams_cfg, f"Daily Report {report_date_str}", fake_report, severity="info")
+        # 遍历所有标的
+        for sym in symbols:
+            price_thr = read_price_thresholds(config, sym)
+            vol_ratio, vol_tol = read_volume_params(config, sym)
+            logger.info(
+                f"[{sym}] 阈值确认 | OPEN={price_thr['OPEN']:.4%}, HIGH={price_thr['HIGH']:.4%}, "
+                f"LOW={price_thr['LOW']:.4%}, CLOSE={price_thr['CLOSE']:.4%} | "
+                f"VOLUME: r={vol_ratio:.2f}, tol={vol_tol:.2%}"
+            )
+
+            rows_a = fetch_ohlc_in_range(conn, table, sym, A_ID, ts_mode, start_utc, end_utc)
+            rows_b = fetch_ohlc_in_range(conn, table, sym, B_ID, ts_mode, start_utc, end_utc)
+
+            price_stats, volume_stats = aggregate_daily_for_symbol(rows_a, rows_b, price_thr, vol_ratio)
+            per_symbol[sym] = {
+                'price': price_stats,
+                'volume': volume_stats,
+                'volume_ratio': vol_ratio,
+                'volume_tolerance': vol_tol,
+            }
+
+        # 写日报文件
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        out_dir  = os.path.join(base_dir, "daily_report_kline_volume")
+        os.makedirs(out_dir, exist_ok=True)
+        md = render_markdown(report_date_str, timeframe, start_utc, end_utc, per_symbol)
+        out_name = f"daily_report_{report_date_str}_UTC.md"
+        out_path = os.path.join(out_dir, out_name)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(md)
+        logger.info(f"[日报] 已生成：{out_path}")
+
+        # === ✅ 生成并发送真实摘要到 Teams ===
+        chunks = render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol)
+        if not chunks:
+            logger.warning("无可发送摘要（per_symbol 为空），跳过 Teams 发送。")
+        else:
+            for title, text in chunks:
+                logger.info(f"准备发送日报至 Teams: {title}")
+                try:
+                    send_teams_alert(teams_cfg, title, text, severity="info")
+                    logger.info(f"Teams 日报已发送: {title}")
+                except Exception as e:
+                    logger.warning(f"Teams 摘要发送失败：{e} | 标题={title}")
 
     except Exception as e:
         logger.critical(f"日报生成失败：{e}", exc_info=True)
@@ -150,6 +181,10 @@ def main():
             except Exception:
                 pass
             logger.info("数据库连接已关闭。")
+
+if __name__ == "__main__":
+    main()
+
 
 if __name__ == "__main__":
     main()
