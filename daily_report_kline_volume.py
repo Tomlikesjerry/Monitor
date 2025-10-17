@@ -186,9 +186,9 @@ def aggregate_daily_for_symbol(rows_a: List[dict], rows_b: List[dict],
 
 # ---------- Markdown 渲染 ----------
 def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[str, dict]) -> List[Tuple[str, str]]:
-    lines_all = []
     total_price_ex = sum(sum(v['price']['counts'].values()) for v in per_symbol.values())
     vol_exceed_count = sum(1 for v in per_symbol.values() if abs(v['volume']['diff_rel']) > v['volume_tolerance'])
+
     header = (
         f"📊 日报（K线+成交量统计）UTC {report_date_str}\n\n"
         f"时间：{start_utc.strftime('%Y-%m-%d %H:%M')} ~ {end_utc.strftime('%Y-%m-%d %H:%M')} UTC\n"
@@ -196,13 +196,21 @@ def render_summary_chunks(report_date_str, start_utc, end_utc, per_symbol: Dict[
         f"四价越阈总次数：{total_price_ex}\n"
         f"成交量超阈标的数：{vol_exceed_count}\n\n"
     )
-    lines_all.append(header)
+
+    # 每个标的单独换行，使用 Markdown 两个空格 + \n 强制换行
+    body_lines = []
     for sym, v in per_symbol.items():
         c = v['price']['counts']
         dev = v['volume']['diff_rel']
         r = v['volume_ratio']
-        lines_all.append(f"[{sum(c.values())}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | Vol dev={_fmt_pct(dev)} (r={r:.2f})")
-    return [(f"📊 日报（K线+成交量统计）UTC {report_date_str}", "\n".join(lines_all))]
+        body_lines.append(
+            f"[{sum(c.values())}] {sym}: O={c['OPEN']} H={c['HIGH']} L={c['LOW']} C={c['CLOSE']} | "
+            f"Vol dev={_fmt_pct(dev)} (r={r:.2f})  \n"  # ← 两个空格 + \n 表示换行
+        )
+
+    body = header + "".join(body_lines)
+    return [(f"📊 日报（K线+成交量统计）UTC {report_date_str}", body)]
+
 
 # ---------- 主流程 ----------
 def main():
